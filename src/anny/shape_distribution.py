@@ -18,10 +18,10 @@ class MorphologicalAgeMapping(torch.nn.Module):
         self.register_buffer("anny_age_anchors", _none_or_to_tensor(anny_age_anchors, dtype=dtype))
         self.register_buffer("morphological_age_anchors", _none_or_to_tensor(morphological_age_anchors, dtype=dtype))
 
-    def load_state_dict(self, state_dict, strict = True, assign = False):
+    def load_state_dict(self, state_dict, *args, **kwargs):
         self.anny_age_anchors = torch.empty_like(state_dict["anny_age_anchors"])            
         self.morphological_age_anchors = torch.empty_like(state_dict["morphological_age_anchors"])
-        return super().load_state_dict(state_dict, strict, assign)
+        return super().load_state_dict(state_dict, *args, **kwargs)
 
     def morphological_to_anny_age(self, morphological_age):
         coeffs = anny.utils.interpolation.linear_interpolation_coefficients(morphological_age, self.morphological_age_anchors, extrapolate=True)
@@ -43,11 +43,11 @@ class ConditionalBetaDistribution(torch.nn.Module):
         self.register_buffer("alpha_anchors", _none_or_to_tensor(alpha_anchors, dtype=dtype))
         self.register_buffer("beta_anchors", _none_or_to_tensor(beta_anchors, dtype=dtype))
 
-    def load_state_dict(self, state_dict, strict = True, assign = False):
+    def load_state_dict(self, state_dict, *args, **kwargs):
         self.age_anchors = torch.empty_like(state_dict["age_anchors"])
         self.alpha_anchors = torch.empty_like(state_dict["alpha_anchors"])
         self.beta_anchors = torch.empty_like(state_dict["beta_anchors"])
-        return super().load_state_dict(state_dict, strict, assign)
+        return super().load_state_dict(state_dict, *args, **kwargs)
 
     def get_distribution_params(self, age):
         coefs = anny.utils.interpolation.linear_interpolation_coefficients(age, anchors=self.age_anchors, extrapolate=False)
