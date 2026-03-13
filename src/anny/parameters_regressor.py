@@ -1,6 +1,7 @@
 # Anny
 # Copyright (C) 2025 NAVER Corp.
 # Apache License, Version 2.0
+import pdb
 import torch
 import roma
 from typing import Dict, Any, Tuple, List, Optional
@@ -94,7 +95,6 @@ class ParametersRegressor:
             - List[int]: Indices of facial bones that should retain identity rotation (used to preserve neutral expressions mainly for the default rig).
         """
         face_joints = {
-            # "oculi01.L", "oculi01.R", 
             "risorius03.L", "risorius03.R", "levator06.L", "levator06.R",
             "oris03.L", "oris03.R", "oris05", "oris01", "oris07.L", "oris07.R", "levator05.L", "levator05.R",
             'toe1-1.L', 'toe1-2.L', 'toe2-1.L', 'toe2-2.L', 'toe2-3.L', 'toe3-1.L', 'toe3-2.L', 'toe3-3.L', 'toe4-1.L', 'toe4-2.L', 'toe4-3.L', 'toe5-1.L', 'toe5-2.L', 'toe5-3.L','toe1-1.R', 'toe1-2.R', 'toe2-1.R', 'toe2-2.R', 'toe2-3.R', 'toe3-1.R', 'toe3-2.R', 'toe3-3.R', 'toe4-1.R', 'toe4-2.R', 'toe4-3.R', 'toe5-1.R', 'toe5-2.R', 'toe5-3.R',
@@ -113,6 +113,7 @@ class ParametersRegressor:
             'orbicularis03.R',
             'orbicularis04.R'
         }
+        face_joints = {}
         return [k for k, name in enumerate(self.bone_labels) if name in face_joints]
     
     def _init_pose_macro_local(
@@ -137,6 +138,7 @@ class ParametersRegressor:
             pose_parameters = roma.Rigid.Identity(dim=3, batch_shape=(batch_size, self.model.bone_count), dtype=self.dtype, device=self.device).to_homogeneous()
 
         phenotype_kwargs = {k: torch.full((batch_size,), 0.5, dtype=self.dtype, device=self.device) for k in self.model.phenotype_labels}
+        phenotype_kwargs['age'] = torch.tensor([0.7], dtype=self.dtype, device=self.device).repeat(batch_size) # starting from an adult average age to help convergence
         for k, v in initial_phenotype_kwargs.items():
             if isinstance(v, torch.Tensor):
                 assert v.shape[0] == batch_size
@@ -281,11 +283,6 @@ class ParametersRegressor:
         W_up = torch.cat([W, 2. * W.max() * torch.ones(W.shape[0],W.shape[1],1).to(device=device,dtype=dtype)],2)
 
         R_valid, t_valid = roma.rigid_points_registration(Xr_up[:, valid], Xt_up[:, valid], weights=W_up[:, valid], compute_scaling=False)
-        
-        # for i, k in enumerate(self.model.bone_labels):
-        #     if valid[i] and i not in self.indices_identity:
-        #         print(k)
-        # self.model.bone_labels[valid.cpu().tolist()]
 
         R = torch.eye(3, dtype=dtype, device=device)[None,None].repeat(batch_size,J,1,1)
         t = torch.zeros(3, dtype=dtype, device=device)[None,None].repeat(batch_size,J,1)
@@ -299,9 +296,7 @@ class ParametersRegressor:
         output_abs = self.model(pose_parameters=pose_abs, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='absolute')
         pose_root = self.model.get_pose_parameterization(output_abs, target_pose_parameterization='root_relative_world')
 
-        # --- Sanitize to prevent drift ---
         pose_root = self._sanitize_pose_parameters(pose_root)
-        # ----------------------------------------
 
         pose_root[:, 0] = torch.eye(4, device=device)
         for i in range(1, pose_root.shape[1]):
@@ -316,10 +311,6 @@ class ParametersRegressor:
         R_root, t_root = roma.rigid_points_registration(output_neutral['vertices'], output_abs['vertices'], compute_scaling=False)
         pose_root[:, 0, :3, :3] = R_root
         pose_root[:, 0, :3, -1] = t_root
-
-        # --- Sanitize final result ---
-        pose_root = self._sanitize_pose_parameters(pose_root)
-        # -----------------------------------------------
 
         vertices = output_neutral['vertices'][:, self.unique_ids] @ R_root.transpose(-2, -1) + t_root[:, None]
 
@@ -390,10 +381,20 @@ class ParametersRegressor:
         output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
         v_ref = output['vertices'][:,self.unique_ids] # [batch_size,V,3]
         b_ref = output['bone_poses'] # [batch_size,K,4,4]
+
+        # Global alignment init
+        R0, t0 = roma.rigid_points_registration(v_ref, vertices_target, compute_scaling=False)
+        # print('R0', R0[0])
+        pose_parameters[:, 0, :3, :3] = R0
+        pose_parameters[:, 0, :3, -1] = t0
+        output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
+        v_ref = output['vertices'][:, self.unique_ids]
+        b_ref = output['bone_poses']
     
         for iter in range(max_n_iters):
-            # 1. Estimate Pose (Rigid Registration)
+            # 1. Estimate Pose (Rigid Registration) - TODO use pose_parameters (R0+t0) inside _jointwise_registration_to_pose ??
             pose_parameters, v_hat = self._jointwise_registration_to_pose(v_ref, vertices_target, b_ref, phenotype_kwargs, local_changes_kwargs)
+            # print('R1', pose_parameters[0,0,:3,:3])
             
             # 2. Optimize Phenotypes (Optional)
             if optimize_phenotypes:
@@ -404,8 +405,12 @@ class ParametersRegressor:
                     self.reg_weights[[self.model.phenotype_labels.index(k) for k in optim_keys]]
                 ).to(self.device)[None]
                 
-                # delta = torch.linalg.solve(A.transpose(2, 1) @ A + reg, (A.transpose(2, 1) @ b[:, :, None])[:, :, 0])
-                delta = torch.linalg.lstsq(A, b).solution
+                delta = torch.linalg.solve(A.transpose(2, 1) @ A + reg, (A.transpose(2, 1) @ b[:, :, None])[:, :, 0])
+                # delta = torch.linalg.lstsq(A, b).solution
+
+                # AtA = A.transpose(2,1) @ A
+                # Atb = (A.transpose(2,1) @ b[...,None])[...,0]
+                # delta = torch.linalg.solve(AtA + reg, Atb)
 
                 delta = torch.nan_to_num(delta, nan=0.0)  # or other fill value
                 for i, k in enumerate(optim_keys):
@@ -418,13 +423,8 @@ class ParametersRegressor:
                         diff = torch.clamp(delta[:, i], -max_delta, max_delta)
                         phenotype_kwargs[k] = torch.clamp(phenotype_kwargs[k] + diff, 0.01, 0.99)
 
-                output = self.model(pose_parameters=pose_parameters.clone(), phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
-
-                pose_parameters = self._apply_global_adjustment(pose_parameters, output['vertices'][:, self.unique_ids], vertices_target)
-                output = self.model(pose_parameters=pose_parameters.clone(), phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
-
-                v_hat = output['vertices'][:, self.unique_ids]
-                b_ref = output['bone_poses']
+                if iter == max_n_iters - 1:
+                    pose_parameters, _ = self._jointwise_registration_to_pose(v_ref, vertices_target, b_ref, phenotype_kwargs, local_changes_kwargs)
             
             # --- Always update b_ref for the next iteration ---
             # We must refresh the model output to get the bone poses that correspond 
@@ -434,7 +434,7 @@ class ParametersRegressor:
                                 pose_parameterization='root_relative_world')
 
             v_hat = output['vertices'][:, self.unique_ids]
-            b_ref = output['bone_poses'] # Updates reference bones for next ICP
+            b_ref = output['bone_poses'] # Updates reference bones
             v_ref = v_hat
             # ---------------------------------------------------------
 
