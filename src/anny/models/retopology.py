@@ -10,6 +10,9 @@ from anny.utils.mesh_utils import triangulate_faces
 from anny.paths import ANNY_CACHE_DIR, ANNY_ROOT_DIR, ANNY2SMPLX_DATA_PATH, download_noncommercial_data
 import collections
 import roma
+import logging
+
+logger = logging.getLogger(__name__)
 
 def _create_interpolated_topology_model(reference_model,
                                         vertices,

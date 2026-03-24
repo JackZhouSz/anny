@@ -108,10 +108,6 @@ class LinearBlendSkinning(torch.autograd.Function):
                 device=ctx.vertices.device)
         
         return tuple([wp.to_torch(grad) if grad is not None else None for grad in input_grad])
-        # return (grad_or_none(ctx.vertices),
-        #         grad_or_none(ctx.bone_weights),
-        #         None,
-        #         grad_or_none(ctx.bone_transforms))
 
 def linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms):
     return LinearBlendSkinning.apply(vertices, bone_weights, bone_indices, bone_transforms)
@@ -135,9 +131,5 @@ if __name__ == "__main__":
     transformed_vertices = linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms)
     foo = torch.sum(transformed_vertices)
     foo.backward()
-
-    import timeit
-    #print("warp", timeit.timeit(lambda : linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms), number=200))
-
 
 

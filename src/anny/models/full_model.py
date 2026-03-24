@@ -12,6 +12,10 @@ import anny.utils.obj_utils
 from anny.models.phenotype import RiggedModelWithPhenotypeParameters, PHENOTYPE_VARIATIONS
 import pathlib
 from anny.paths import ANNY_CACHE_DIR, ANNY_ROOT_DIR
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def load_blend_shape(filename, vertices_count, world_transformation, dtype):
     blend_shape = torch.zeros((vertices_count, 3), dtype=dtype)
@@ -39,6 +43,8 @@ def load_macrodetails(root_dirname,
         newborn_blend_shape_scaling = torch.as_tensor([0.922,0.922,0.75], dtype=dtype) # Empirical values to scale down the body for newborns
         normalizing_factor = 3. # the cumulated weight of newborn blend shapes when the age is set to newborn
                 
+        logger.info(f"Loading macrodetails blend shapes...")
+
         # Load macrodetails_components
         macrodetails_dir=os.path.join(root_dirname, "data/mpfb2/targets/macrodetails")
         # Universal macrodetails_components
@@ -53,7 +59,6 @@ def load_macrodetails(root_dirname,
                         if age == "newborn":
                             blend_shape = newborn_blend_shape_scaling[None,:] * blend_shape + ((newborn_blend_shape_scaling[None,:] - 1) / normalizing_factor) * template_vertices
                         universal_blend_shapes[(gender, age, muscle, weight)] = blend_shape
-                        print(filename)
 
         # 'Race'-based components
         race_blend_shapes = dict()
@@ -66,7 +71,6 @@ def load_macrodetails(root_dirname,
                         if age == "newborn":
                             blend_shape = newborn_blend_shape_scaling[None,:] * blend_shape + ((newborn_blend_shape_scaling[None,:] - 1) / normalizing_factor) * template_vertices
                         race_blend_shapes[(race, gender, age)] = blend_shape
-                        print(filename)
 
         # Height based components
         height_blend_shape = dict()
@@ -81,7 +85,6 @@ def load_macrodetails(root_dirname,
                             if age == "newborn":
                                 blend_shape = newborn_blend_shape_scaling[None,:] * blend_shape + ((newborn_blend_shape_scaling[None,:] - 1) / normalizing_factor) * template_vertices
                             height_blend_shape[(gender, age, muscle, weight, height)] = blend_shape
-                            print(filename)
 
         # Proportions based components
         proportions_blend_shapes = dict()
@@ -94,7 +97,6 @@ def load_macrodetails(root_dirname,
                                 filename = os.path.join(macrodetails_dir, "proportions", f"{gender}-{age}-{muscle}-{weight}-{proportions}.target.gz")
                                 blend_shape = load_blend_shape(filename, vertices_count=vertices_count, world_transformation=world_transformation, dtype=dtype)
                                 proportions_blend_shapes[(gender, age, muscle, weight, proportions)] = blend_shape
-                                print(filename)
 
         # Breast related blend shapes
         breast_macrodetails_dir = os.path.join(root_dirname, "data/mpfb2/targets/breast")
@@ -110,7 +112,6 @@ def load_macrodetails(root_dirname,
                                     assert age not in ["newborn", "baby"]
                                     blend_shape = load_blend_shape(filename, vertices_count=vertices_count, world_transformation=world_transformation, dtype=dtype)
                                     breast_blend_shapes[(gender, age, muscle, weight, cupsize, firmness)] = blend_shape
-                                    print(filename)
         return universal_blend_shapes, race_blend_shapes, height_blend_shape, proportions_blend_shapes, breast_blend_shapes
 
 def _get_coordinates_regressor(groups, data):
@@ -258,7 +259,7 @@ def load_data(rig: str = "default",
                     vertex_bone_weights[vertex_idx].append(vertex_weight)
         # Pad the lists to have the same length for each vertex
         max_bones_per_vertex = max([len(indices) for indices in vertex_bone_indices])
-        print(f"{max_bones_per_vertex=}")
+        logger.info(f"{max_bones_per_vertex=}")
         for indices, weights in zip(vertex_bone_indices, vertex_bone_weights):
             while len(indices) < max_bones_per_vertex:
                 indices.append(0)
@@ -312,7 +313,7 @@ def load_data(rig: str = "default",
                                 local_blend_shapes.append(pos_blend_shape)
                                 local_blend_shapes.append(neg_blend_shape)
                         
-        print(f"{len(universal_blend_shapes)=}, {len(race_blend_shapes)=}, {len(height_blend_shapes)=}, {len(proportions_blend_shapes)=}, {len(breast_blend_shapes)=}, {len(local_blend_shapes)=}")
+        logger.info(f"{len(universal_blend_shapes)=}, {len(race_blend_shapes)=}, {len(height_blend_shapes)=}, {len(proportions_blend_shapes)=}, {len(breast_blend_shapes)=}, {len(local_blend_shapes)=}")
         stacked_phenotype_blend_shapes = torch.stack(l_blend_shape + local_blend_shapes) # [564,19158,3]
         stacked_phenotype_blend_shapes_mask = torch.stack(l_mask) # [564,25]
 
@@ -494,7 +495,7 @@ def create_model(rig = "default",
             if torch.any(smallest_weight > 0):
                 break
             vertices_count, max_influencing_bones_count = cached_dict['vertex_bone_weights'].shape
-            print("Reducing the number of influencing bones to ", max_influencing_bones_count-1)
+            logger.info("Reducing the number of influencing bones to ", max_influencing_bones_count-1)
             mask = torch.arange(max_influencing_bones_count)[None,:] != index[:,None]
             cached_dict['vertex_bone_weights'] = cached_dict['vertex_bone_weights'][mask].reshape(vertices_count, max_influencing_bones_count - 1)
             cached_dict['vertex_bone_indices'] = cached_dict['vertex_bone_indices'][mask].reshape(vertices_count, max_influencing_bones_count - 1)

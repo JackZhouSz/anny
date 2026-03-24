@@ -3,6 +3,7 @@
 # Apache License, Version 2.0
 import pathlib
 import os
+import logging
 
 ANNY_ROOT_DIR = pathlib.Path(__file__).resolve().parent
 
@@ -12,12 +13,13 @@ ANNY_CACHE_DIR = pathlib.Path(os.getenv("ANNY_CACHE_DIR", str(DEFAULT_CACHE_PATH
 
 ANNY2SMPLX_DATA_PATH = ANNY_CACHE_DIR / "noncommercial/anny2smplx.pth"
 
+logger = logging.getLogger(__name__)
+
 def download_noncommercial_data(cache_dir=ANNY_CACHE_DIR):
     noncommercial_data_url = "https://download.europe.naverlabs.com/humans/Anny/noncommercial.zip"
     dest_path = cache_dir / "noncommercial"
 
-    print("-------------------")
-    print("Downloading non-commercial data...")
+    logger.info("Downloading non-commercial data...")
     dest_path.mkdir(parents=True, exist_ok=True)
     zip_path = cache_dir / "noncommercial.zip"
     
@@ -35,23 +37,23 @@ def download_noncommercial_data(cache_dir=ANNY_CACHE_DIR):
     # Show the license file
     license_file = dest_path / "LICENSE.txt"
     if license_file.exists():
-        print("License Information:")
-        print("---------------------")
+        logger.info("License Information:")
+        logger.info("---------------------")
         with open(license_file, 'r') as f:
-            print(f.read())
+            logger.info(f.read())
     else:
-        print("LICENSE.txt file not found.")
-    print("-------------------")
+        logger.info("LICENSE.txt file not found.")
+    logger.info("-------------------")
 
     # Show the notice file
     notice_file = dest_path / "NOTICE.txt"
     if notice_file.exists():
-        print("-------------------")
+        logger.info("-------------------")
         with open(notice_file, 'r') as f:
-            print(f.read())
+            logger.info(f.read())
     else:
-        print("NOTICE.txt file not found.")
-    print("-------------------")
+        logger.info("NOTICE.txt file not found.")
+    logger.info("-------------------")
     
     # Clean up the zip file
     os.remove(zip_path)
