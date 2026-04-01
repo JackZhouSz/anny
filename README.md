@@ -65,9 +65,9 @@ The code of Anny, Copyright (c) 2025 NAVER Corp., is licensed under the Apache L
 ## Citation
 
 ```
-@misc{brégier2025humanmeshmodelinganny,
+@misc{br\’egier2025humanmeshmodelinganny,
       title={Human Mesh Modeling for Anny Body}, 
-      author={Romain Brégier and Guénolé Fiche and Laura Bravo-Sánchez and Thomas Lucas and Matthieu Armando and Philippe Weinzaepfel and Grégory Rogez and Fabien Baradel},
+      author={Romain Br\’egier and Gu\’enol\’e Fiche and Laura Bravo-S\’anchez and Thomas Lucas and Matthieu Armando and Philippe Weinzaepfel and Gr\’egory Rogez and Fabien Baradel},
       year={2025},
       eprint={2511.03589},
       archivePrefix={arXiv},
