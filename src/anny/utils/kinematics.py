@@ -204,13 +204,13 @@ def parallel_forward_kinematic(kinematic_propagation_fronts,
 
 def parallel_forward_kinematic_absolute_orientations(kinematic_propagation_fronts,
                                rest_bone_poses,
-                               absolute_delta_transforms_absolute):
+                               absolute_orientations,
+                               base_transform=None):
     """
     Args:
         - kinematic_propagation_fronts: output of get_kinematic_propagation_fronts
         - rest_bone_poses: torch.Tensor of shape [bs,B,4,4]
         - absolute_orientations: torch.Tensor of shape [bs,B,3,3]
-        - mode: string
     Return:
         - poses: [bs,B,4,4]
         - transforms: [bs,B,4,4]
@@ -220,11 +220,12 @@ def parallel_forward_kinematic_absolute_orientations(kinematic_propagation_front
 
     bs, B, _, _ = rest_bone_poses.shape
 
-    device = rest_bone_poses.device
+    T = rest_bone_poses
+
     bone_rest_poses_inv = roma.Rigid.from_homogeneous(rest_bone_poses).inverse().to_homogeneous()
 
     # Preallocate tensors for poses and transforms with the same shape as rest_bone_poses
-    poses = torch.zeros_like(rest_bone_poses)
+    poses = torch.empty_like(rest_bone_poses)
     transforms = torch.empty_like(rest_bone_poses)
 
     for i in range(len(l_grouped_indices)):
@@ -234,22 +235,21 @@ def parallel_forward_kinematic_absolute_orientations(kinematic_propagation_front
         # Handle bones with no parents first
         for bone_id, parent_id in zip(grouped_joints_indices, grouped_joints_parents):
             if parent_id == -1:  # Root bones
-                import pdb; pdb.set_trace()
-                poses[:, bone_id] = rest_bone_poses[:, bone_id].clone()
-                poses[:, bone_id,:3,:3] = absolute_delta_transforms_absolute[:, bone_id].clone() # Use clone to avoid in-place modification of T
-                transforms[:, bone_id] = torch.einsum('bij,bjk->bik', poses[:, bone_id].clone(), bone_rest_poses_inv[:, bone_id].clone()) # Clone here too
+                root_poses = T[:, bone_id] if (base_transform is None) else base_transform @ T[:, bone_id]
+                poses[:, bone_id] = root_poses
+                poses[:, bone_id, :3,:3] = absolute_orientations[:, bone_id]
+                transforms[:, bone_id] = torch.einsum('bij,bjk->bik', root_poses, bone_rest_poses_inv[:, bone_id])
 
         # Now handle bones with parents
-        parent_mask = torch.tensor([p >= 0 for p in grouped_joints_parents], dtype=torch.bool, device=device)
-        children = torch.tensor(grouped_joints_indices, dtype=torch.long, device=device)[parent_mask]
-        parents = torch.tensor(grouped_joints_parents, dtype=torch.long, device=device)[parent_mask]
+        parent_mask = torch.tensor([p >= 0 for p in grouped_joints_parents], dtype=torch.bool, device=T.device)
+        children = torch.tensor(grouped_joints_indices, dtype=torch.long, device=T.device)[parent_mask]
+        parents = torch.tensor(grouped_joints_parents, dtype=torch.long, device=T.device)[parent_mask]
 
         if children.numel() > 0:
-            poses[:, children] = transforms[:, parents] @ rest_bone_poses[:,children]
-            # Replace the orientation by the input
-            poses[:,children,:3,:3] = absolute_delta_transforms_absolute[:,children]
-            transforms[:, children] = torch.einsum('blij,bljk->blik', poses[:, children].clone(), bone_rest_poses_inv[:, children].clone())
-
+            children_poses = torch.einsum('blij,bljk->blik', transforms[:, parents], T[:, children])
+            children_poses[:,:,:3,:3] = absolute_orientations[:, children,:,:]
+            poses[:, children] = children_poses
+            transforms[:, children] = torch.einsum('blij,bljk->blik', children_poses, bone_rest_poses_inv[:, children])
     return poses, transforms
 
 def get_bone_poses(bone_heads, bone_tails, bone_rolls_rotmat, y_axis, degenerate_rotation, epsilon=0.1):

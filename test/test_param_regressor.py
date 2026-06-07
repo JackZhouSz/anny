@@ -30,7 +30,7 @@ class TestUtils(unittest.TestCase):
         # create model
         rig = 'default-noeyes-notongue-noexpression-notoes-nohands-nobreasts'
         # rig = 'mixamo'
-        model = anny.create_fullbody_model(rig=rig).to(dtype=dtype, device=device)
+        model = anny.Anny(rig=rig).to(dtype=dtype, device=device)
         batch_size = 32
 
         # random pose
@@ -105,7 +105,7 @@ class TestUtils(unittest.TestCase):
         device = torch.device("cpu")
 
         rig = 'default-noeyes-notongue-noexpression-notoes-nohands-nobreasts'
-        model = anny.create_fullbody_model(rig=rig).to(dtype=dtype, device=device)
+        model = anny.Anny(rig=rig).to(dtype=dtype, device=device)
 
         batch_size = 32
 
@@ -192,7 +192,7 @@ class TestUtils(unittest.TestCase):
 
         rig = 'default'
         topology = 'smplx'
-        model = anny.create_fullbody_model(rig=rig, topology=topology).to(dtype=dtype, device=device)
+        model = anny.Anny(rig=rig, topology=topology).to(dtype=dtype, device=device)
 
         boys_state_dict = torch.load(
             Path(ANNY_ROOT_DIR / "data" / "shape_calibration/boys.pth"),

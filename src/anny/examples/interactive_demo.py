@@ -39,8 +39,7 @@ def main(server_name : str = None, server_port : int = None):
             pose_parameters = roma.Rigid(bones_rotmat, torch.zeros((len(bones_rotmat), 3), dtype=dtype))[None].to_homogeneous()
             output = model(pose_parameters=pose_parameters,
                            phenotype_kwargs=phenotype_kwargs,
-                           local_changes_kwargs=local_changes_kwargs,
-                           return_bone_ends=show_bones)
+                           local_changes_kwargs=local_changes_kwargs)
             vertices = output["vertices"]
             faces = model.faces
 
@@ -48,7 +47,7 @@ def main(server_name : str = None, server_port : int = None):
             with open(temp_params_file.name, "w") as f:
                 data =dict(phenotype_kwargs = {key : value for key, value in phenotype_kwargs.items() if value != 0.5},
                            local_changes_kwargs = {key : value for key, value in local_changes_kwargs.items() if value != 0.},
-                           pose_parameterization = model.default_pose_parameterization,
+                           pose_parameterization = model.pose_parameterization,
                            pose_parameters = {key : matrix for key, matrix in zip(model.bone_labels, pose_parameters.squeeze(dim=0).cpu().numpy().tolist())})
                 json.dump(data, f)
 
@@ -80,10 +79,8 @@ def main(server_name : str = None, server_port : int = None):
 
             if show_bones:
                 # Add bones visualization
-                bone_heads, bone_tails = output['bone_heads'], output['bone_tails']
-                bone_heads = bone_heads.squeeze(dim=0).cpu()
-                bone_tails = bone_tails.squeeze(dim=0).cpu()
-                #bone_colors = [[0.8, 0.4, 0.2, 1.0], [0.8, 0.2, 0.4, 1.0]]
+                bone_heads = output['bone_poses'][..., :3, 3].detach().cpu().squeeze(dim=0)
+
                 bone_colors = [[0.8, 0.3, 0.3, 1.0]]
                 bone_visuals = [trimesh.visual.TextureVisuals(material=trimesh.visual.material.PBRMaterial(baseColorFactor=color,
                                                                         metallicFactor=0.,
@@ -92,15 +89,17 @@ def main(server_name : str = None, server_port : int = None):
                                                                         alphaMode='BLEND')) for color in bone_colors]
                 for i in range(len(bone_heads)):
                     bone_head = bone_heads[i]
-                    bone_tail = bone_tails[i]
-                    cylinder = trimesh.creation.cylinder(radius=0.005, height=torch.norm(bone_tail - bone_head).item(), sections=16)
-                    t = (bone_head + bone_tail) / 2
-                    M = roma.special_gramschmidt(torch.stack([bone_tail - bone_head, torch.tensor([0., 0., 1.], dtype=dtype)], dim=-1))
-                    R = torch.stack([M[:, 2], M[:, 1], M[:,0]], dim=-1)
-                    cylinder.visual = bone_visuals[i % len(bone_colors)]
-                    scene.add_geometry(cylinder, transform=roma.Rigid(R, t).to_homogeneous().numpy(),
-                                       node_name=f"bone_{model.bone_labels[i]}")
-
+                    # Connect to the paent bone if it exists
+                    parent_id = model.bone_parents[i]
+                    if parent_id >= 0:
+                        bone_tail = bone_heads[parent_id]
+                        cylinder = trimesh.creation.cylinder(radius=0.005, height=torch.norm(bone_tail - bone_head).item(), sections=16)
+                        t = (bone_head + bone_tail) / 2
+                        M = roma.special_gramschmidt(torch.stack([bone_tail - bone_head, torch.tensor([0., 0., 1.], dtype=dtype)], dim=-1))
+                        R = torch.stack([M[:, 2], M[:, 1], M[:,0]], dim=-1)
+                        cylinder.visual = bone_visuals[i % len(bone_colors)]
+                        scene.add_geometry(cylinder, transform=roma.Rigid(R, t).to_homogeneous().numpy(),
+                                        node_name=f"bone_{model.bone_labels[i]}")
 
                 # Add some spheres at the joints
                 bone_poses = output["bone_poses"].squeeze(dim=0).cpu()
@@ -133,17 +132,21 @@ def main(server_name : str = None, server_port : int = None):
             """
             nonlocal model, measurements_class, bones_rotvec, phenotype_kwargs, local_changes_kwargs, self_intersection_module
             if model_type == "default":
-                model = anny.create_fullbody_model(rig=rig, topology="default", local_changes=True, extrapolate_phenotypes=extrapolate_phenotypes)
+                model = anny.create_fullbody_model(rig=rig, topology="default", local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes, bone_orientation="blender-rootidentity")
             elif model_type == "notoes_collapse10pc":
-                model = anny.create_fullbody_model(rig=rig, topology="notoes_collapse10pc", local_changes=True, extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True)
+                model = anny.create_fullbody_model(rig=rig, topology="notoes_collapse10pc", local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True, bone_orientation="blender-rootidentity")
             elif model_type == "notoes_collapse5pc":
-                model = anny.create_fullbody_model(rig=rig, topology="notoes_collapse5pc", local_changes=True, extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True)                
+                model = anny.create_fullbody_model(rig=rig, topology="notoes_collapse5pc", local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True, bone_orientation="blender-rootidentity")
+            elif model_type == "smplx":
+                model = anny.create_fullbody_model(rig=rig, topology="smplx", local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True, bone_orientation="blender-rootidentity")
+            elif model_type == "soma":
+                model = anny.create_fullbody_model(rig=rig, topology="soma", local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes, remove_unattached_vertices=True, bone_orientation="blender-rootidentity")
             elif model_type == "right hand":
                 model = anny.create_hand_model(side='R', extrapolate_phenotypes=extrapolate_phenotypes)
             elif model_type == "left hand":
                 model = anny.create_hand_model(side='L', extrapolate_phenotypes=extrapolate_phenotypes)
             elif model_type == "head":
-                model = anny.create_head_model(eyes=True, tongue=True, local_changes=True, extrapolate_phenotypes=extrapolate_phenotypes)
+                model = anny.create_head_model(eyes=True, tongue=True, local_changes="default", extrapolate_phenotypes=extrapolate_phenotypes)
             else:
                 raise ValueError(f"Invalid model type: {model_type}")
             
@@ -200,9 +203,9 @@ def main(server_name : str = None, server_port : int = None):
             with gr.Row():
                 with gr.Column("compact", elem_id="control-column"):
                     model_dropdown = gr.Dropdown(label="Topology",
-                                                    choices=["default", "left hand", "right hand", "head", "notoes_collapse10pc", "notoes_collapse5pc"], value=default_model_value)
+                                                    choices=["default", "left hand", "right hand", "head", "notoes_collapse10pc", "notoes_collapse5pc", "smplx", "soma"], value=default_model_value)
                     rig_dropdown = gr.Dropdown(label="Rig",
-                                                    choices=["default", "mixamo", "default-noeyes-notongue-noexpression-nobreasts-notoes", "default-noeyes-notongue-noexpression-nobreasts-notoes-nohands"],
+                                                    choices=["default", "mixamo", "default-noeyes-notongue-noexpression-nobreasts-notoes", "default-noeyes-notongue-noexpression-nobreasts-notoes-nohands", "soma"],
                                                     value=default_rig_value)
                     show_bones_checkbox.render()
                     show_self_intersections_checkbox.render()

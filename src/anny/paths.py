@@ -5,30 +5,59 @@ import pathlib
 import os
 import logging
 
+PathLike = os.PathLike | str
+
 ANNY_ROOT_DIR = pathlib.Path(__file__).resolve().parent
 
 # Define the default cache directory as a fixed, absolute path (user-overridable)
 DEFAULT_CACHE_PATH = pathlib.Path.home() / ".cache" / "anny"
-ANNY_CACHE_DIR = pathlib.Path(os.getenv("ANNY_CACHE_DIR", str(DEFAULT_CACHE_PATH)))
-
-ANNY2SMPLX_DATA_PATH = ANNY_CACHE_DIR / "noncommercial/anny2smplx.pth"
+_ANNY_CACHE_DIR = [pathlib.Path(os.getenv("ANNY_CACHE_DIR", str(DEFAULT_CACHE_PATH)))]
 
 logger = logging.getLogger(__name__)
 
-def download_noncommercial_data(cache_dir=ANNY_CACHE_DIR):
+def get_anny_cache_path() -> pathlib.Path:
+    """
+    Get the path to the Anny cache directory.
+
+    Returns:
+        pathlib.Path: The path to the Anny cache directory.
+    """
+    return _ANNY_CACHE_DIR[0]
+
+def set_anny_cache_path(path: PathLike):
+    """
+    Set the path to the Anny cache directory.
+
+    Args:
+        path (PathLike): The new path to the Anny cache directory.
+    """
+    global _ANNY_CACHE_DIR
+    _ANNY_CACHE_DIR[0] = pathlib.Path(path)
+
+def get_anny2smplx_data_path() -> pathlib.Path:
+    """
+    Get the path to the Anny2SMPLX data file.
+
+    Returns:
+        pathlib.Path: The path to the Anny2SMPLX data file.
+    """
+    return get_anny_cache_path() / "noncommercial/anny2smplx.pth"
+
+def download_noncommercial_data():
+    cache_dir = get_anny_cache_path()
     noncommercial_data_url = "https://download.europe.naverlabs.com/humans/Anny/noncommercial.zip"
     dest_path = cache_dir / "noncommercial"
 
     logger.info("Downloading non-commercial data...")
     dest_path.mkdir(parents=True, exist_ok=True)
     zip_path = cache_dir / "noncommercial.zip"
-    
+
     # Download the file
     import requests
     response = requests.get(noncommercial_data_url)
     with open(zip_path, 'wb') as f:
         f.write(response.content)
-    
+
     # Unzip the file
     import zipfile
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
@@ -54,6 +83,6 @@ def download_noncommercial_data(cache_dir=ANNY_CACHE_DIR):
     else:
         logger.info("NOTICE.txt file not found.")
     logger.info("-------------------")
-    
+
     # Clean up the zip file
     os.remove(zip_path)

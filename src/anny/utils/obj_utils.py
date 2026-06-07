@@ -3,6 +3,15 @@
 # Apache License, Version 2.0
 import torch
 
+def _pack_face_list(faces, pack_as_tensor):
+    """Pack face indices as a tensor when possible, otherwise return as list."""
+    if not pack_as_tensor or not faces:
+        return faces
+    if len(set(len(f) for f in faces)) > 1:
+        return faces  # mixed polygon sizes — cannot pack as uniform tensor
+    return torch.as_tensor(faces)
+
+
 def load_obj_file(mesh_filename,
                   dtype = torch.float32,
                   pack_as_tensor = True):
@@ -41,13 +50,18 @@ def load_obj_file(mesh_filename,
                     # New group
                     # Pack data from the previous group
                     if len(face_vertex_indices) > 0:
-                        groups[group_name] = dict(face_vertex_indices=torch.as_tensor(face_vertex_indices), face_texture_coordinate_indices=torch.as_tensor(face_texture_coordinate_indices))
+                        groups[group_name] = dict(
+                            face_vertex_indices=_pack_face_list(face_vertex_indices, pack_as_tensor),
+                            face_texture_coordinate_indices=_pack_face_list(face_texture_coordinate_indices, pack_as_tensor),
+                        )
                     # Initialize group data
                     group_name = split[1]
                     if group_name in groups:
                         # Continue adding to existing group
-                        face_vertex_indices = groups[group_name]['face_vertex_indices'].numpy().tolist()
-                        face_texture_coordinate_indices = groups[group_name]['face_texture_coordinate_indices'].numpy().tolist()
+                        fvi = groups[group_name]['face_vertex_indices']
+                        ftci = groups[group_name]['face_texture_coordinate_indices']
+                        face_vertex_indices = fvi.numpy().tolist() if isinstance(fvi, torch.Tensor) else list(fvi)
+                        face_texture_coordinate_indices = ftci.numpy().tolist() if isinstance(ftci, torch.Tensor) else list(ftci)
                     else:
                         face_vertex_indices = []
                         face_texture_coordinate_indices = []
@@ -64,11 +78,11 @@ def load_obj_file(mesh_filename,
                     face_vertex_indices.append(vids)
                     face_texture_coordinate_indices.append(vtids)
 
-    # Pack data from the previous group
     if len(face_vertex_indices) > 0:
-        # There can be both triangles and quads in the mesh data, so "tensorisation" may not work
-        groups[group_name] = dict(face_vertex_indices=as_tensor(face_vertex_indices),
-                                  face_texture_coordinate_indices=as_tensor(face_texture_coordinate_indices))
+        groups[group_name] = dict(
+            face_vertex_indices=_pack_face_list(face_vertex_indices, pack_as_tensor),
+            face_texture_coordinate_indices=_pack_face_list(face_texture_coordinate_indices, pack_as_tensor),
+        )
     
     vertices = as_tensor(vertices, dtype=dtype)
     if len(texture_coordinates) > 0:

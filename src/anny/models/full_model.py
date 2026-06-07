@@ -2,19 +2,37 @@
 # Copyright (C) 2025 NAVER Corp.
 # Apache License, Version 2.0
 import hashlib
+from typing import Literal
 import torch
 import os
 import json
+import pathlib
 import warnings
 import gzip
 import roma
 import anny.utils.obj_utils
-from anny.models.phenotype import RiggedModelWithPhenotypeParameters, PHENOTYPE_VARIATIONS
-import pathlib
-from anny.paths import ANNY_CACHE_DIR, ANNY_ROOT_DIR
+from anny.models.phenotype import PHENOTYPE_VARIATIONS
+from anny.models.model_data import ModelData, ModelMetadata, cache_builder
+from anny.paths import ANNY_ROOT_DIR, PathLike
 import logging
+from anny.models.model_transforms import (
+    LocalChanges,
+    filter_local_changes,
+    edit_mesh,
+    filter_faces,
+    triangulate,
+    compact_skinning_weights,
+    set_metadata,
+)
+import anny.models.model_transforms as model_transforms
 
 logger = logging.getLogger(__name__)
+
+RigPreset = Literal["default", "default_no_toes", "cmu_mb", "game_engine", "mixamo"]
+SkinningMethod = Literal["lbs", "dqs", "warp_lbs"]
+
+
+
 
 
 def load_blend_shape(filename, vertices_count, world_transformation, dtype):
@@ -42,7 +60,7 @@ def load_macrodetails(root_dirname,
         # Newborn blend shapes are created as a scaled down version of the baby blend shapes
         newborn_blend_shape_scaling = torch.as_tensor([0.922,0.922,0.75], dtype=dtype) # Empirical values to scale down the body for newborns
         normalizing_factor = 3. # the cumulated weight of newborn blend shapes when the age is set to newborn
-                
+
         logger.info(f"Loading macrodetails blend shapes...")
 
         # Load macrodetails_components
@@ -128,234 +146,264 @@ def _get_coordinates_regressor(groups, data):
         return data['vertex_indices']
     else:
         raise NotImplementedError
-         
-def load_data(rig: str = "default",
+
+
+
+def _build_model_data_from_raw(d: dict, bone_labels, bone_parents, local_change_labels) -> ModelData:
+    """Assemble a ModelData from the raw tensors computed in load_data."""
+    metadata = ModelMetadata(
+        model_type="tail",
+        bone_parents=bone_parents,
+        bone_labels=bone_labels,
+        local_change_labels=local_change_labels,
+        pose_parameterization="local-bone",
+        skinning_method=None,
+        all_phenotypes=False,
+        extrapolate_phenotypes=False,
+        bone_orientation="blender-rootidentity",
+    )
+    return ModelData(
+        metadata=metadata,
+        template_vertices=d["template_vertices"],
+        faces=d["faces"],
+        texture_coordinates=d["texture_coordinates"],
+        face_texture_coordinate_indices=d["face_texture_coordinate_indices"],
+        blendshapes=d["blendshapes"],
+        stacked_phenotype_blend_shapes_mask=d["stacked_phenotype_blend_shapes_mask"],
+        template_bone_heads=d["template_bone_heads"],
+        bone_heads_blendshapes=d["bone_heads_blendshapes"],
+        vertex_bone_weights=d["vertex_bone_weights"],
+        vertex_bone_indices=d["vertex_bone_indices"],
+        base_mesh_vertex_indices=torch.arange(len(d["template_vertices"]), dtype=torch.int64),
+        template_bone_tails=d["template_bone_tails"],
+        bone_tails_blendshapes=d["bone_tails_blendshapes"],
+        bone_rolls_rotmat=d["bone_rolls_rotmat"],
+    )
+
+@cache_builder
+def load_data(
+            weights_filename: PathLike,
+            rig_filename: PathLike,
             eyes: bool = False,
             tongue : bool = False,
-            bones_to_remove = set(),
-            root_dirname : str = ANNY_ROOT_DIR,
-            cache_dirname : str = ANNY_CACHE_DIR):
-    hash = hashlib.md5(f"{rig}_{eyes}_{tongue}_{'_'.join(sorted(list(bones_to_remove)))}".encode()).hexdigest()
-    cache_filename = os.path.join(cache_dirname, f"data_{hash}.pth")
-    if os.path.exists(cache_filename):
-        cached_dict = torch.load(cache_filename, weights_only=True)
-    else:        
-        dtype = torch.float64
-        # Consider a world transformation to use a "Z up" coordinate system with meter as unit for consistency with Blender.
-        # Do not mess with this, or it will change the bone orientations.
-        world_transformation = roma.Linear(0.1 * roma.euler_to_rotmat("X", [90], degrees=True, dtype=dtype))[None]
+            remove_zero_weights_bones : bool = False,
+            bones_to_remove: set[str] = set(),
+            root_dirname : PathLike = ANNY_ROOT_DIR,
+) -> ModelData:
+    # Copy so we never mutate a caller-owned set, and so the shared default never accumulates state across calls.
+    bones_to_remove = set(bones_to_remove)
 
-        # Load the base mesh
-        base_mesh_filename = os.path.join(root_dirname, "data/mpfb2/3dobjs/base.obj")
-        template_vertices, texture_coordinates, groups = anny.utils.obj_utils.load_obj_file(base_mesh_filename, dtype=dtype)
-        template_vertices = world_transformation.apply(template_vertices)
-        # For each group, compute vertex unique ids
-        for group in groups.values():
-            group["vertex_unique_indices"] = torch.unique(group["face_vertex_indices"].flatten())
+    logger.info("Cache not found, loading data from source files and caching it for future use...")
+    dtype = torch.float64
+    # Consider a world transformation to use a "Z up" coordinate system with meter as unit for consistency with Blender.
+    # Do not mess with this, or it will change the bone orientations.
+    world_transformation = roma.Linear(0.1 * roma.euler_to_rotmat("X", [90], degrees=True, dtype=dtype))[None]
 
-        # These are quad faces
-        face_vertex_indices = groups["body"]["face_vertex_indices"]
-        face_texture_coordinate_indices = groups["body"]["face_texture_coordinate_indices"]
-        # Get texture coordinates as well
-        
-        # Add eyes faces
-        if eyes:
-            face_vertex_indices = torch.concatenate([face_vertex_indices, groups["helper-l-eye"]["face_vertex_indices"], groups["helper-r-eye"]["face_vertex_indices"]], dim=0)
-            face_texture_coordinate_indices = torch.concatenate([face_texture_coordinate_indices, groups["helper-l-eye"]["face_texture_coordinate_indices"], groups["helper-r-eye"]["face_texture_coordinate_indices"]], dim=0)
-        if tongue:
-            face_vertex_indices = torch.concatenate([face_vertex_indices, groups["helper-tongue"]["face_vertex_indices"]], dim=0)
-            face_texture_coordinate_indices = torch.concatenate([face_texture_coordinate_indices, groups["helper-tongue"]["face_texture_coordinate_indices"]], dim=0)
+    # Load the base mesh
+    base_mesh_filename = os.path.join(root_dirname, "data/mpfb2/3dobjs/base.obj")
+    template_vertices, texture_coordinates, groups = anny.utils.obj_utils.load_obj_file(base_mesh_filename, dtype=dtype)
+    template_vertices = world_transformation.apply(template_vertices)
+    # For each group, compute vertex unique ids
+    for group in groups.values():
+        group["vertex_unique_indices"] = torch.unique(group["face_vertex_indices"].flatten())
 
-        # Load rig
-        if rig == "default":
-            rig_filename = "data/mpfb2/rigs/standard/rig.default.json"
-            weights_filename = "data/mpfb2/rigs/standard/weights.default.json"
-        elif rig == "default_no_toes":
-            rig_filename = "data/mpfb2/rigs/standard/rig.default_no_toes.json"
-            weights_filename = "data/mpfb2/rigs/standard/weights.default.json"
-        elif rig == "cmu_mb":
-            rig_filename = "data/mpfb2/rigs/standard/rig.cmu_mb.json"
-            weights_filename = "data/mpfb2/rigs/standard/weights.cmu_mb.json"
-        elif rig == "game_engine":
-            rig_filename = "data/mpfb2/rigs/standard/rig.game_engine.json"
-            weights_filename = "data/mpfb2/rigs/standard/weights.game_engine.json"
-        elif rig == "mixamo":
-            rig_filename = "data/mpfb2/rigs/standard/rig.mixamo.json"
-            weights_filename = "data/mpfb2/rigs/standard/weights.mixamo.json"            
+    # These are quad faces
+    face_vertex_indices = groups["body"]["face_vertex_indices"]
+    face_texture_coordinate_indices = groups["body"]["face_texture_coordinate_indices"]
+    # Get texture coordinates as well
+
+    # Add eyes faces
+    if eyes:
+        face_vertex_indices = torch.concatenate([face_vertex_indices, groups["helper-l-eye"]["face_vertex_indices"], groups["helper-r-eye"]["face_vertex_indices"]], dim=0)
+        face_texture_coordinate_indices = torch.concatenate([face_texture_coordinate_indices, groups["helper-l-eye"]["face_texture_coordinate_indices"], groups["helper-r-eye"]["face_texture_coordinate_indices"]], dim=0)
+    if tongue:
+        face_vertex_indices = torch.concatenate([face_vertex_indices, groups["helper-tongue"]["face_vertex_indices"]], dim=0)
+        face_texture_coordinate_indices = torch.concatenate([face_texture_coordinate_indices, groups["helper-tongue"]["face_texture_coordinate_indices"]], dim=0)
+
+    assert rig_filename is not None
+    assert weights_filename is not None
+
+
+    with open(rig_filename, "r") as f:
+        rig_data = json.load(f)
+
+    if "bones" in rig_data.keys():
+        rig_data = rig_data["bones"]
+
+    # Look for a bone that has no parent and consider it as the root
+    root_joints = [node for node in rig_data.keys() if ('parent' not in rig_data[node].keys() or rig_data[node]['parent'] == "")]
+    assert len(root_joints) == 1
+    root_joint = root_joints[0]
+
+    # Load a sparse encoding of bones and weights associated to each vertex
+    with open(weights_filename) as f:
+        weights_data = json.load(f)
+
+    # Offsets are used to define the orientation of the bones.
+    bone_tail_offsets = [torch.zeros(3, dtype=dtype) for _ in range(len(rig_data))]
+
+    # Order joints to ensure that parents are indexed before children when processing them sequentially
+    bone_labels = []
+    bone_parents = []
+    def parse_recursively(bone_label, parent_id):
+        bone_id = len(bone_labels)
+        bone_labels.append(bone_label)
+        bone_parents.append(parent_id)
+        for node in rig_data.keys():
+            if not (node in bone_labels) and rig_data[node]['parent'] == bone_label:
+                parse_recursively(node, parent_id=bone_id)
+    parse_recursively(root_joint, parent_id=-1)
+    assert len(bone_labels) == len(rig_data)
+
+    if remove_zero_weights_bones:
+        for bone_label in bone_labels:
+            if len(weights_data["weights"][bone_label]) == 0:
+                bones_to_remove.add(bone_label)
+
+    # Remove some bones
+    for bone_label in bones_to_remove:
+        idx = bone_labels.index(bone_label)
+        parent_idx = bone_parents[idx]
+        # Assign vertices to the parent bone
+        weights_data["weights"][bone_labels[parent_idx]].extend(weights_data["weights"][bone_label])
+        weights_data["weights"].pop(bone_label)
+        # Skip this bone in the kinematic tree
+        for i in range(len(bone_parents)):
+            if bone_parents[i] == idx:
+                bone_parents[i] = parent_idx
+            elif bone_parents[i] > idx:
+                bone_parents[i] -= 1 # update indices to account for the pop just below
+        bone_labels.pop(idx)
+        bone_parents.pop(idx)
+
+    # Reset the root joint to the first bone
+    root_joints = [node for node in rig_data.keys() if rig_data[node]['parent'] == ""]
+    assert len(root_joints) == 1
+    root_joint = root_joints[0]
+
+    # Load bone keypoints parameters (head tail and roll parametrization)
+    bone_head_regressor_indices = []
+    bone_tail_regressor_indices = []
+    bone_rolls = []
+
+    for bone_name in bone_labels:
+        bone_head_regressor_indices.append(torch.as_tensor(_get_coordinates_regressor(groups, rig_data[bone_name]["head"]), dtype=torch.int64))
+        bone_tail_regressor_indices.append(torch.as_tensor(_get_coordinates_regressor(groups, rig_data[bone_name]["tail"]), dtype=torch.int64))
+        bone_rolls.append(rig_data[bone_name]["roll"])
+
+    vertices_count = len(template_vertices)
+    vertex_bone_indices = [[] for _ in range(vertices_count)]
+    vertex_bone_weights = [[] for _ in range(vertices_count)]
+    for bone_id, bone_label in enumerate(bone_labels):
+        if bone_label not in weights_data["weights"]:
+            warnings.warn("Remove joints without associated weights")
+            continue
+        joint_weight_data = weights_data['weights'][bone_label]
+        if len(joint_weight_data) == 0:
+            warnings.warn("Remove joints without associated weights")
         else:
-            raise ValueError("Invalid rig type")
+            for vertex_idx, vertex_weight in joint_weight_data:
+                vertex_bone_indices[vertex_idx].append(bone_id)
+                vertex_bone_weights[vertex_idx].append(vertex_weight)
+    # Pad the lists to have the same length for each vertex
+    max_bones_per_vertex = max([len(indices) for indices in vertex_bone_indices])
+    logger.info(f"{max_bones_per_vertex=}")
+    for indices, weights in zip(vertex_bone_indices, vertex_bone_weights):
+        while len(indices) < max_bones_per_vertex:
+            indices.append(0)
+            weights.append(0.)
+    vertex_bone_indices = torch.as_tensor(vertex_bone_indices, dtype=torch.int64)
+    vertex_bone_weights = torch.as_tensor(vertex_bone_weights, dtype=dtype)
+    vertex_bone_weights /= torch.sum(vertex_bone_weights, dim=-1, keepdim=True)
 
-        with open(os.path.join(root_dirname, rig_filename), "r") as f:
-            rig_data = json.load(f)
-        if rig == "mixamo":
-            rig_data = rig_data["bones"]
+    # Load blend shapes
+    universal_blend_shapes, race_blend_shapes, height_blend_shapes, proportions_blend_shapes, breast_blend_shapes = load_macrodetails(root_dirname=root_dirname, template_vertices=template_vertices, world_transformation=world_transformation, dtype=template_vertices.dtype)
 
-        # Look for a bone that has no parent and consider it as the root
-        root_joints = [node for node in rig_data.keys() if rig_data[node]['parent'] == ""]
-        assert len(root_joints) == 1
-        root_joint = root_joints[0]
+    # Stack all macrodetails blend shapes together for better vectorization and efficiency at runtime.
+    # List of stacked macrodetails keys
+    l_macrodetails = []
+    for detail_type, values in PHENOTYPE_VARIATIONS.items():
+        for z in values:
+            l_macrodetails.append(z)
+    assert len(set(l_macrodetails)) == len(l_macrodetails), "Non unique keys"
+    l_blend_shape = []
+    l_mask = []
+    for blend_shapes in [universal_blend_shapes,
+                        race_blend_shapes,
+                        height_blend_shapes,
+                        proportions_blend_shapes,
+                        breast_blend_shapes]:
+        for components, blend_shape in blend_shapes.items():
+            l_blend_shape.append(blend_shape)
+            mask = torch.zeros(len(l_macrodetails), dtype=dtype)
+            for x in components:
+                idx = l_macrodetails.index(x)
+                mask[idx] = 1
+            l_mask.append(mask)
 
-        # Load a sparse encoding of bones and weights associated to each vertex
-        with open(os.path.join(root_dirname, weights_filename)) as f:
-            weights_data = json.load(f)
+    # Append local changes blend shapes as well
+    local_blend_shapes = []
+    local_change_labels = []
+    # Load local blend shapes
+    with open(os.path.join(root_dirname, "data/mpfb2/targets/target.json"), "r") as f:
+        targets_metadata = json.load(f)
 
-        # Offsets are used to define the orientation of the bones.
-        bone_tail_offsets = [torch.zeros(3, dtype=dtype) for _ in range(len(rig_data))]
+    for key, metadata in targets_metadata.items():
+        if key != "genitals":
+            for category in metadata["categories"]:
+                for side in ["left", "right", "unsided"]:
+                    if "opposites" in category:
+                        neg, pos = category["opposites"][f"negative-{side}"], category["opposites"][f"positive-{side}"]
+                        if len(neg) > 0 and len(pos) > 0:
+                            neg_blend_shape = load_blend_shape(os.path.join(root_dirname, "data/mpfb2/targets", key, neg + ".target.gz"), vertices_count=len(template_vertices), world_transformation=world_transformation, dtype=template_vertices.dtype)
+                            pos_blend_shape = load_blend_shape(os.path.join(root_dirname, "data/mpfb2/targets", key, pos + ".target.gz"), vertices_count=len(template_vertices), world_transformation=world_transformation, dtype=template_vertices.dtype)
+                            local_change_labels.append(pos)
+                            local_blend_shapes.append(pos_blend_shape)
+                            local_blend_shapes.append(neg_blend_shape)
 
-        # Order joints to ensure that parents are indexed before children when processing them sequentially
-        bone_labels = []
-        bone_parents = []
-        def parse_recursively(bone_label, parent_id):
-            bone_id = len(bone_labels)
-            bone_labels.append(bone_label)
-            bone_parents.append(parent_id)
-            for node in rig_data.keys():
-                if not (node in bone_labels) and rig_data[node]['parent'] == bone_label:
-                    parse_recursively(node, parent_id=bone_id)
-        parse_recursively(root_joint, parent_id=-1)
-        assert len(bone_labels) == len(rig_data)
+    logger.info(f"{len(universal_blend_shapes)=}, {len(race_blend_shapes)=}, {len(height_blend_shapes)=}, {len(proportions_blend_shapes)=}, {len(breast_blend_shapes)=}, {len(local_blend_shapes)=}")
+    stacked_phenotype_blend_shapes = torch.stack(l_blend_shape + local_blend_shapes) # [564,19158,3]
+    stacked_phenotype_blend_shapes_mask = torch.stack(l_mask) # [564,25]
 
-        # Remove some bones
-        for bone_label in bones_to_remove:
-            idx = bone_labels.index(bone_label)
-            parent_idx = bone_parents[idx]
-            # Assign vertices to the parent bone
-            weights_data["weights"][bone_labels[parent_idx]].extend(weights_data["weights"][bone_label])
-            weights_data["weights"].pop(bone_label)
-            # Skip this bone in the kinematic tree
-            for i in range(len(bone_parents)):
-                if bone_parents[i] == idx:
-                    bone_parents[i] = parent_idx
-                elif bone_parents[i] > idx:
-                    bone_parents[i] -= 1 # update indices to account for the pop just below
-            bone_labels.pop(idx)
-            bone_parents.pop(idx)
+    bones_count = len(bone_labels)
 
-        # Reset the root joint to the first bone
-        root_joints = [node for node in rig_data.keys() if rig_data[node]['parent'] == ""]
-        assert len(root_joints) == 1
-        root_joint = root_joints[0]
+    # Precompute bones head and tail locations, as well as corresponding blendshapes
+    template_bone_tails = []
+    tails_blend_shapes = []
+    template_bone_heads = []
+    heads_blend_shapes = []
+    for bone_id in range(bones_count):
+        template_bone_tails.append(torch.mean(template_vertices[bone_tail_regressor_indices[bone_id]], dim=0))
+        tails_blend_shapes.append(torch.mean(stacked_phenotype_blend_shapes[:,bone_tail_regressor_indices[bone_id],:], dim=1) + bone_tail_offsets[bone_id])
+        template_bone_heads.append(torch.mean(template_vertices[bone_head_regressor_indices[bone_id]], dim=0))
+        heads_blend_shapes.append(torch.mean(stacked_phenotype_blend_shapes[:,bone_head_regressor_indices[bone_id],:], dim=1))
+    template_bone_heads = torch.stack(template_bone_heads)
+    heads_blend_shapes = torch.stack(heads_blend_shapes, dim=1)
+    template_bone_tails = torch.stack(template_bone_tails)
+    tails_blend_shapes = torch.stack(tails_blend_shapes, dim=1)
+    bone_rolls_rotmat = roma.euler_to_rotmat('Y', [torch.tensor([bone_rolls])]).to(dtype) # [1,K,3,3]
 
-        # Load bone keypoints parameters (head tail and roll parametrization)
-        bone_head_regressor_indices = []
-        bone_tail_regressor_indices = []
-        bone_rolls = []
-        
-        for bone_name in bone_labels:
-            bone_head_regressor_indices.append(torch.as_tensor(_get_coordinates_regressor(groups, rig_data[bone_name]["head"]), dtype=torch.int64))
-            bone_tail_regressor_indices.append(torch.as_tensor(_get_coordinates_regressor(groups, rig_data[bone_name]["tail"]), dtype=torch.int64))
-            bone_rolls.append(rig_data[bone_name]["roll"])            
-
-        vertices_count = len(template_vertices)
-        vertex_bone_indices = [[] for _ in range(vertices_count)]
-        vertex_bone_weights = [[] for _ in range(vertices_count)]
-        for bone_id, bone_label in enumerate(bone_labels):
-            joint_weight_data = weights_data['weights'][bone_label]
-            if len(joint_weight_data) == 0:
-                warnings.warn("Remove joints without associated weights")
-            else:
-                for vertex_idx, vertex_weight in joint_weight_data: 
-                    vertex_bone_indices[vertex_idx].append(bone_id)
-                    vertex_bone_weights[vertex_idx].append(vertex_weight)
-        # Pad the lists to have the same length for each vertex
-        max_bones_per_vertex = max([len(indices) for indices in vertex_bone_indices])
-        logger.info(f"{max_bones_per_vertex=}")
-        for indices, weights in zip(vertex_bone_indices, vertex_bone_weights):
-            while len(indices) < max_bones_per_vertex:
-                indices.append(0)
-                weights.append(0.)
-        vertex_bone_indices = torch.as_tensor(vertex_bone_indices, dtype=torch.int64)
-        vertex_bone_weights = torch.as_tensor(vertex_bone_weights, dtype=dtype)
-        vertex_bone_weights /= torch.sum(vertex_bone_weights, dim=-1, keepdim=True)
-
-        # Load blend shapes
-        universal_blend_shapes, race_blend_shapes, height_blend_shapes, proportions_blend_shapes, breast_blend_shapes = load_macrodetails(root_dirname=root_dirname, template_vertices=template_vertices, world_transformation=world_transformation, dtype=template_vertices.dtype)
-
-        # Stack all macrodetails blend shapes together for better vectorization and efficiency at runtime.
-        # List of stacked macrodetails keys
-        l_macrodetails = []
-        for detail_type, values in PHENOTYPE_VARIATIONS.items():
-            for z in values:
-                l_macrodetails.append(z)
-        assert len(set(l_macrodetails)) == len(l_macrodetails), "Non unique keys"
-        l_blend_shape = []
-        l_mask = []
-        for blend_shapes in [universal_blend_shapes,
-                            race_blend_shapes,
-                            height_blend_shapes,
-                            proportions_blend_shapes,
-                            breast_blend_shapes]:
-            for components, blend_shape in blend_shapes.items():
-                l_blend_shape.append(blend_shape)
-                mask = torch.zeros(len(l_macrodetails), dtype=dtype)
-                for x in components:
-                    idx = l_macrodetails.index(x)
-                    mask[idx] = 1
-                l_mask.append(mask)
-
-        # Append local changes blend shapes as well
-        local_blend_shapes = []
-        local_change_labels = []
-        # Load local blend shapes
-        with open(os.path.join(root_dirname, "data/mpfb2/targets/target.json"), "r") as f:
-            targets_metadata = json.load(f)
-
-        for key, metadata in targets_metadata.items():
-            if key != "genitals":
-                for category in metadata["categories"]:
-                    for side in ["left", "right", "unsided"]:
-                        if "opposites" in category:
-                            neg, pos = category["opposites"][f"negative-{side}"], category["opposites"][f"positive-{side}"]
-                            if len(neg) > 0 and len(pos) > 0:
-                                neg_blend_shape = load_blend_shape(os.path.join(root_dirname, "data/mpfb2/targets", key, neg + ".target.gz"), vertices_count=len(template_vertices), world_transformation=world_transformation, dtype=template_vertices.dtype)
-                                pos_blend_shape = load_blend_shape(os.path.join(root_dirname, "data/mpfb2/targets", key, pos + ".target.gz"), vertices_count=len(template_vertices), world_transformation=world_transformation, dtype=template_vertices.dtype)
-                                local_change_labels.append(pos)
-                                local_blend_shapes.append(pos_blend_shape)
-                                local_blend_shapes.append(neg_blend_shape)
-                        
-        logger.info(f"{len(universal_blend_shapes)=}, {len(race_blend_shapes)=}, {len(height_blend_shapes)=}, {len(proportions_blend_shapes)=}, {len(breast_blend_shapes)=}, {len(local_blend_shapes)=}")
-        stacked_phenotype_blend_shapes = torch.stack(l_blend_shape + local_blend_shapes) # [564,19158,3]
-        stacked_phenotype_blend_shapes_mask = torch.stack(l_mask) # [564,25]
-
-        bones_count = len(bone_labels)
-
-        # Precompute bones head and tail locations, as well as corresponding blendshapes
-        template_bone_tails = []
-        tails_blend_shapes = []
-        template_bone_heads = []
-        heads_blend_shapes = []
-        for bone_id in range(bones_count):
-            template_bone_tails.append(torch.mean(template_vertices[bone_tail_regressor_indices[bone_id]], dim=0))
-            tails_blend_shapes.append(torch.mean(stacked_phenotype_blend_shapes[:,bone_tail_regressor_indices[bone_id],:], dim=1) + bone_tail_offsets[bone_id])
-            template_bone_heads.append(torch.mean(template_vertices[bone_head_regressor_indices[bone_id]], dim=0))
-            heads_blend_shapes.append(torch.mean(stacked_phenotype_blend_shapes[:,bone_head_regressor_indices[bone_id],:], dim=1))
-        template_bone_heads = torch.stack(template_bone_heads)
-        heads_blend_shapes = torch.stack(heads_blend_shapes, dim=1)
-        template_bone_tails = torch.stack(template_bone_tails)
-        tails_blend_shapes = torch.stack(tails_blend_shapes, dim=1)
-        bone_rolls_rotmat = roma.euler_to_rotmat('Y', [torch.tensor([bone_rolls])]).to(dtype) # [1,K,3,3]
-        
-        cached_dict = dict(template_vertices=template_vertices,
-                            faces = face_vertex_indices,
-                            texture_coordinates=texture_coordinates,
-                            face_texture_coordinate_indices=face_texture_coordinate_indices,
-                            blendshapes=stacked_phenotype_blend_shapes,
-                            template_bone_heads=template_bone_heads,
-                            template_bone_tails=template_bone_tails,
-                            bone_heads_blendshapes=heads_blend_shapes,
-                            bone_tails_blendshapes=tails_blend_shapes,
-                            bone_rolls_rotmat=bone_rolls_rotmat,
-                            bone_labels=bone_labels,
-                            bone_parents=bone_parents,
-                            vertex_bone_weights=vertex_bone_weights,
-                            vertex_bone_indices=vertex_bone_indices,
-                            stacked_phenotype_blend_shapes_mask=stacked_phenotype_blend_shapes_mask,
-                            local_change_labels = local_change_labels)
-
-        if cache_filename != "":
-            os.makedirs(os.path.dirname(cache_filename), exist_ok=True)
-            torch.save(cached_dict, cache_filename)
-    return cached_dict
+    data = _build_model_data_from_raw(
+        dict(
+            template_vertices=template_vertices,
+            faces=face_vertex_indices,
+            texture_coordinates=texture_coordinates,
+            face_texture_coordinate_indices=face_texture_coordinate_indices,
+            blendshapes=stacked_phenotype_blend_shapes,
+            template_bone_heads=template_bone_heads,
+            template_bone_tails=template_bone_tails,
+            bone_heads_blendshapes=heads_blend_shapes,
+            bone_tails_blendshapes=tails_blend_shapes,
+            bone_rolls_rotmat=bone_rolls_rotmat,
+            vertex_bone_weights=vertex_bone_weights,
+            vertex_bone_indices=vertex_bone_indices,
+            stacked_phenotype_blend_shapes_mask=stacked_phenotype_blend_shapes_mask,
+        ),
+        bone_labels=bone_labels,
+        bone_parents=bone_parents,
+        local_change_labels=local_change_labels,
+    )
+    return data
 
 def get_edited_mesh_faces(faces: torch.Tensor, face_texture_coordinate_indices: torch.Tensor) -> torch.Tensor:
     """
@@ -419,97 +467,95 @@ def get_edited_mesh_faces(faces: torch.Tensor, face_texture_coordinate_indices: 
 
     return faces_out, face_texture_coordinate_indices_out
 
-def create_model(rig = "default",
-                 topology = "default",
-                 eyes = False,
-                 tongue = False,
-                bones_to_remove = set(),
-                faces_to_keep = None,
-                local_changes = False,                
-                skinning_method : str = None,
-                remove_unattached_vertices = False,
-                triangulate_faces=False,
-                all_phenotypes = False,
-                default_pose_parameterization = "root_relative_world",
-                extrapolate_phenotypes=False,
-                root_dirname = ANNY_ROOT_DIR,
-                cache_dirname = ANNY_CACHE_DIR):
-        cached_dict = load_data(rig=rig, eyes=eyes,
-                                tongue=tongue,
-                                bones_to_remove=bones_to_remove,
-                                root_dirname=root_dirname,
-                                cache_dirname=cache_dirname)
 
-        # Filter out local changes that are not needed
-        local_changes_mask = [False] * len(cached_dict["local_change_labels"])
-        if local_changes == True:
-            # Keep all local changes except for nipple-related ones
-            local_changes_mask = ["nipple" not in label.lower() for label in cached_dict["local_change_labels"]]
-        elif local_changes == "all":
-            local_changes_mask = [True] * len(cached_dict["local_change_labels"])
-        elif isinstance(local_changes, list) or isinstance(local_changes, tuple):
-            for label in local_changes:
-                i = cached_dict["local_change_labels"].index(label)
-                local_changes_mask[i] = True
-        local_change_labels = [label for i, label in enumerate(cached_dict["local_change_labels"]) if local_changes_mask[i]]
-        # Keep only blend shapes corresponding to selected local changes
-        phenotype_blend_shape_count = len(cached_dict["blendshapes"]) - 2 * len(cached_dict["local_change_labels"])
-        blend_shapes_mask = torch.concatenate((torch.ones(phenotype_blend_shape_count, dtype=torch.bool), torch.as_tensor(local_changes_mask, dtype=torch.bool).repeat_interleave(2)))
-        cached_dict["blendshapes"] = cached_dict["blendshapes"][blend_shapes_mask]
-        cached_dict["bone_heads_blendshapes"] = cached_dict["bone_heads_blendshapes"][blend_shapes_mask]
-        cached_dict["bone_tails_blendshapes"] = cached_dict["bone_tails_blendshapes"][blend_shapes_mask]
-        cached_dict["local_change_labels"] = local_change_labels
-        
-        if topology == "default":
-            # Minor mesh edits
-            cached_dict['faces'], cached_dict['face_texture_coordinate_indices'] = get_edited_mesh_faces(cached_dict['faces'], cached_dict['face_texture_coordinate_indices'])
-        else:
-            assert topology == "makehuman", "Invalid topology option"
+# Maps a `RigPreset` name to (rig basename, weights basename) under data/mpfb2/rigs/standard/.
+# `default_no_toes` shares the default weights file.
+_RIG_PRESET_FILES: dict[str, tuple[str, str]] = {
+    "default":         ("rig.default.json",         "weights.default.json"),
+    "default_no_toes": ("rig.default_no_toes.json", "weights.default.json"),
+    "cmu_mb":          ("rig.cmu_mb.json",          "weights.cmu_mb.json"),
+    "game_engine":     ("rig.game_engine.json",     "weights.game_engine.json"),
+    "mixamo":          ("rig.mixamo.json",          "weights.mixamo.json"),
+}
 
-        if faces_to_keep is not None:
-            cached_dict['faces'] = cached_dict['faces'][faces_to_keep,:]
-            cached_dict['face_texture_coordinate_indices'] = cached_dict['face_texture_coordinate_indices'][faces_to_keep,:]
 
-        if not remove_unattached_vertices:
-            base_mesh_vertex_indices = torch.arange(len(cached_dict['template_vertices']), dtype=torch.int64)
-        else:
-            # Keep only vertices belonging to faces
-            base_mesh_vertex_indices = torch.unique(cached_dict['faces'].flatten(), sorted=True)
-            old_to_new_indices = torch.full((len(cached_dict['template_vertices']),), fill_value=-1, dtype=torch.int64)
-            old_to_new_indices[base_mesh_vertex_indices] = torch.arange(len(base_mesh_vertex_indices))
+def _filenames_from_rig(rig: RigPreset | PathLike, weights_filename: PathLike | None, root_dirname: PathLike):
+    """Resolve a rig preset name (or a custom rig JSON path) to (rig_filename, weights_filename)."""
+    standard_dir = os.path.join(root_dirname, "data/mpfb2/rigs/standard")
+    if rig in _RIG_PRESET_FILES:
+        rig_basename, weights_basename = _RIG_PRESET_FILES[rig]
+        rig_filename = os.path.join(standard_dir, rig_basename)
+        if weights_filename is None:
+            weights_filename = os.path.join(standard_dir, weights_basename)
+    else:
+        rig_filename = str(rig)
 
-            cached_dict['template_vertices'] = cached_dict['template_vertices'][base_mesh_vertex_indices]
-            cached_dict['vertex_bone_weights'] = cached_dict['vertex_bone_weights'][base_mesh_vertex_indices]
-            cached_dict['vertex_bone_indices'] = cached_dict['vertex_bone_indices'][base_mesh_vertex_indices]
-            cached_dict['blendshapes'] = cached_dict['blendshapes'][:,base_mesh_vertex_indices,:]
-            _, vertices_per_face = cached_dict['faces'].shape
-            cached_dict['faces'] = old_to_new_indices[cached_dict['faces'].flatten()].reshape(-1, vertices_per_face)
-            assert torch.all(cached_dict['faces'] >= 0)
+    if not pathlib.Path(rig_filename).exists():
+        raise FileNotFoundError(f"Rig file not found: {rig_filename}")
+    if weights_filename is None:
+        raise ValueError("weights_filename must be provided when using a custom rig path")
+    if not pathlib.Path(weights_filename).exists():
+        raise FileNotFoundError(f"Weights file not found: {weights_filename}")
+    return rig_filename, str(weights_filename)
 
-            # TODO: keep only texture coordinates that are used by a face
-        
-        # Reduce the number of influencing bones to the minimum
-        while True:
-            index = torch.argmin(cached_dict['vertex_bone_weights'], dim=-1)
-            smallest_weight = torch.gather(cached_dict['vertex_bone_weights'], dim=-1, index=index[:,None])
-            if torch.any(smallest_weight > 0):
-                break
-            vertices_count, max_influencing_bones_count = cached_dict['vertex_bone_weights'].shape
-            logger.info("Reducing the number of influencing bones to ", max_influencing_bones_count-1)
-            mask = torch.arange(max_influencing_bones_count)[None,:] != index[:,None]
-            cached_dict['vertex_bone_weights'] = cached_dict['vertex_bone_weights'][mask].reshape(vertices_count, max_influencing_bones_count - 1)
-            cached_dict['vertex_bone_indices'] = cached_dict['vertex_bone_indices'][mask].reshape(vertices_count, max_influencing_bones_count - 1)
+def build_model_data(rig: RigPreset | PathLike = "default",
+                 topology: str = "default",
+                 eyes: bool = False,
+                 tongue: bool = False,
+                 bones_to_remove: set[str] = set(),
+                 faces_to_keep: torch.Tensor | None = None,
+                 local_changes: LocalChanges = "none",
+                 skinning_method: SkinningMethod | None = None,
+                 remove_unattached_vertices: bool = False,
+                 remove_skinning_islands: bool = True,
+                 enforce_skinning_weights_symmetry: bool = True,
+                 triangulate_faces: bool = False,
+                 all_phenotypes: bool = False,
+                 pose_parameterization: str = "local-bone",
+                 extrapolate_phenotypes: bool = False,
+                 bone_orientation: str = "blender-rootidentity",
+                 root_dirname: PathLike = ANNY_ROOT_DIR,
+                 weights_filename: PathLike | None = None)-> ModelData:
+    rig_filename, weights_filename = _filenames_from_rig(rig, weights_filename, root_dirname)
+    data = load_data(
+        rig_filename=rig_filename,
+        weights_filename=weights_filename,
+        eyes=eyes,
+        tongue=tongue,
+        bones_to_remove=bones_to_remove,
+        root_dirname=root_dirname,
+    )
 
-        if triangulate_faces:
-            faces, face_texture_coordinate_indices = anny.utils.mesh_utils.triangulate_faces_with_texture_coordinates(vertices=cached_dict['template_vertices'],
-                                                                                                                      faces=cached_dict['faces'].detach().cpu().numpy().tolist(),
-                                                                                                                      face_texture_coordinate_indices=cached_dict['face_texture_coordinate_indices'].detach().cpu().numpy().tolist())
-            cached_dict['faces'] = torch.as_tensor(faces, dtype=torch.int64)
-            cached_dict['face_texture_coordinate_indices'] = torch.as_tensor(face_texture_coordinate_indices, dtype=torch.int64)            
+    data = filter_local_changes(data, local_changes)
 
-        return RiggedModelWithPhenotypeParameters(skinning_method=skinning_method,
-                                           default_pose_parameterization=default_pose_parameterization,
-                                           all_phenotypes=all_phenotypes,
-                                           extrapolate_phenotypes=extrapolate_phenotypes,
-                                           base_mesh_vertex_indices=base_mesh_vertex_indices,
-                                           **cached_dict)
+    if topology == "default":
+        data = edit_mesh(data)
+    else:
+        assert topology == "makehuman", "Invalid topology option"
+
+    if faces_to_keep is not None:
+        data = filter_faces(data, faces_to_keep)
+
+    if remove_unattached_vertices:
+        data = model_transforms.remove_unattached_vertices(data)
+
+    if enforce_skinning_weights_symmetry:
+        data = model_transforms.symmetrize_skinning_weights(data)
+
+    if remove_skinning_islands:
+        data = model_transforms.remove_skinning_islands(data)
+
+    data = compact_skinning_weights(data)
+
+    if triangulate_faces:
+        data = triangulate(data)
+
+    data = set_metadata(
+        data,
+        skinning_method=skinning_method,
+        pose_parameterization=pose_parameterization,
+        all_phenotypes=all_phenotypes,
+        extrapolate_phenotypes=extrapolate_phenotypes,
+        bone_orientation=bone_orientation,
+    )
+    return data

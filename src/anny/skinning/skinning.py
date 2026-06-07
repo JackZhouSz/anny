@@ -26,7 +26,7 @@ def linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms)
     # Gather the relevant bone transforms for each vertex.
     # Expand bone_transforms so that the vertex dimension matches bone_indices for gathering
     bone_transforms_expanded = bone_transforms.unsqueeze(1).expand(batch_size, num_vertices, num_bones, 4, 4)
-    
+
     # We need to make sure bone_indices is aligned to match the gathering axis
     bone_indices_expanded = bone_indices.unsqueeze(-1).unsqueeze(-1).expand(batch_size, num_vertices, max_bones_per_vertex, 4, 4)
 
@@ -113,7 +113,7 @@ def dual_quaternion_skinning(vertices, bone_weights, bone_indices, bone_transfor
     norm = torch.linalg.norm(mean_rotation_part, dim=-1, keepdim=True)
     mean_rotation_part = mean_rotation_part / norm
     mean_translation_part = mean_translation_part / norm
-    
+
     tr = (2. * roma.quat_product(mean_translation_part, roma.quat_conjugation(mean_rotation_part)))[...,:3]
     skinned_vertices = roma.quat_action(mean_rotation_part, vertices) + tr
     return skinned_vertices
@@ -125,7 +125,7 @@ def apply_linear_blendshape(template_vertices,
             - template_vertices: Px3 tensor of vertices
             - blendshapes: CxPx3 tensor of blend shape offsets
             - blendshape_coeffs: BxC tensor
-            
+
         """
         return template_vertices[None] + torch.einsum("cpd, bc -> bpd", blendshapes, blendshape_coeffs)
 
@@ -144,7 +144,7 @@ if __name__ == "__main__":
 
     transformed_vertices = linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms)
     transformed_vertices_qual_quat = dual_quaternion_skinning(vertices, bone_weights, bone_indices, bone_transforms)
-    
+
     import timeit
     print("LBS", timeit.timeit(lambda : linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms), number=200))
     print("DQS", timeit.timeit(lambda : dual_quaternion_skinning(vertices, bone_weights, bone_indices, bone_transforms), number=200))

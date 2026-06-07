@@ -86,9 +86,8 @@ def get_corresponding_vertex_indices(source_vertices, target_vertices, threshold
         value, index = torch.min(distances, dim=0)
         value = value.item()
         index = index.item()
-        # assert value < threshold, "No corresponding vertex"
-        import pdb
-        assert value < threshold, pdb.set_trace()
+        if value >= threshold:
+            raise ValueError(f"No corresponding vertex found within threshold {threshold} (closest distance: {value})")
         indices.append(index)
     return indices
 

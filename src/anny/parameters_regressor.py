@@ -6,8 +6,6 @@ import torch
 import roma
 from typing import Dict, Any, Tuple, List, Optional
 
-import torch
-
 class ParametersRegressor:
     """
     Estimate Anny parameters fitting a target mesh.
@@ -191,7 +189,7 @@ class ParametersRegressor:
         vertices = self.model(pose_parameters=pose_parameters_all, 
                     phenotype_kwargs=phenotype_kwargs_all, 
                     local_changes_kwargs=local_changes_kwargs_all, 
-                    pose_parameterization='root_relative_world')['vertices'][:,self.unique_ids]
+                    pose_parameterization='local-bone')['vertices'][:,self.unique_ids]
         vertices_rearranged = vertices.reshape(batch_size, -1, vertices.shape[1], 3)
         err = (vertices_rearranged[:,1:] - vertices_rearranged[:,[0]])
 
@@ -293,8 +291,8 @@ class ParametersRegressor:
 
         pose_abs = b_tar.to_homogeneous()
 
-        output_abs = self.model(pose_parameters=pose_abs, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='absolute')
-        pose_root = self.model.get_pose_parameterization(output_abs, target_pose_parameterization='root_relative_world')
+        output_abs = self.model(pose_parameters=pose_abs, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='world')
+        pose_root = self.model.get_pose_parameterization(output_abs, pose_parameterization='local-bone')
 
         pose_root = self._sanitize_pose_parameters(pose_root)
 
@@ -306,7 +304,7 @@ class ParametersRegressor:
                 pose_root[:, i, :3, -1] = 0
         pose_root[:, self.indices_identity, :3, :3] = torch.eye(3, device=device)
 
-        output_neutral = self.model(pose_parameters=pose_root.clone(), phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
+        output_neutral = self.model(pose_parameters=pose_root.clone(), phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='local-bone')
 
         R_root, t_root = roma.rigid_points_registration(output_neutral['vertices'], output_abs['vertices'], compute_scaling=False)
         pose_root[:, 0, :3, :3] = R_root
@@ -378,7 +376,7 @@ class ParametersRegressor:
         pose_parameters, phenotype_kwargs, local_changes_kwargs = self._init_pose_macro_local(batch_size, initial_phenotype_kwargs, initial_pose_parameters)
 
         # Initial model pass
-        output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
+        output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='local-bone')
         v_ref = output['vertices'][:,self.unique_ids] # [batch_size,V,3]
         b_ref = output['bone_poses'] # [batch_size,K,4,4]
 
@@ -387,7 +385,7 @@ class ParametersRegressor:
         # print('R0', R0[0])
         pose_parameters[:, 0, :3, :3] = R0
         pose_parameters[:, 0, :3, -1] = t0
-        output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='root_relative_world')
+        output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs, local_changes_kwargs=local_changes_kwargs, pose_parameterization='local-bone')
         v_ref = output['vertices'][:, self.unique_ids]
         b_ref = output['bone_poses']
     
@@ -431,7 +429,7 @@ class ParametersRegressor:
             # to the new pose_parameters calculated in this step.
             output = self.model(pose_parameters=pose_parameters, phenotype_kwargs=phenotype_kwargs,
                                 local_changes_kwargs=local_changes_kwargs,
-                                pose_parameterization='root_relative_world')
+                                pose_parameterization='local-bone')
 
             v_hat = output['vertices'][:, self.unique_ids]
             b_ref = output['bone_poses'] # Updates reference bones
@@ -445,7 +443,7 @@ class ParametersRegressor:
             v_ref = v_hat
 
         # returning pose parameters to the required parametrization
-        pose_parameters = self.model.get_pose_parameterization(output, target_pose_parameterization=self.model.default_pose_parameterization)
+        pose_parameters = self.model.get_pose_parameterization(output, pose_parameterization=self.model.pose_parameterization)
             
         return pose_parameters, phenotype_kwargs, v_hat
     

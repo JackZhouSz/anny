@@ -6,4 +6,7 @@ dist/
 *.egg-info
 docs/build/
 *.ply
-
+.env
+.claude/
+smplx_models/
+test/data/

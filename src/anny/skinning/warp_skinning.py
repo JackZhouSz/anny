@@ -52,7 +52,6 @@ class LinearBlendSkinning(torch.autograd.Function):
         """
         B1, num_vertices, _ = vertices.shape
         max_bones_per_vertex = bone_indices.shape[-1]
-        num_bones = bone_transforms.shape[1]
         batch_size = max(B1, bone_transforms.shape[0])
         assert bone_weights.shape == bone_indices.shape
 
@@ -80,7 +79,7 @@ class LinearBlendSkinning(torch.autograd.Function):
 
         ctx.kernel = get_kernel(max_bones_per_vertex,
                                 vertices_scalar_dtype=ctx.vertices_scalar_dtype,
-                                weights_dtype=ctx.bone_weights.dtype, 
+                                weights_dtype=ctx.bone_weights.dtype,
                                 indices_dtype=ctx.bone_indices.dtype,
                                 vec3_dtype=ctx.vec3_dtype,
                                 mat44_dtype=ctx.mat44_dtype)
@@ -106,11 +105,11 @@ class LinearBlendSkinning(torch.autograd.Function):
                 adj_outputs=[wp.from_torch(adj_output.contiguous(), dtype=ctx.vec3_dtype)],
                 adjoint=True,
                 device=ctx.vertices.device)
-        
+
         return tuple([wp.to_torch(grad) if grad is not None else None for grad in input_grad])
 
 def linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms):
-    return LinearBlendSkinning.apply(vertices, bone_weights, bone_indices, bone_transforms)
+    return LinearBlendSkinning.apply(vertices, bone_weights.squeeze(0), bone_indices.squeeze(0), bone_transforms)
 
 if __name__ == "__main__":
     # Example usage
@@ -119,17 +118,16 @@ if __name__ == "__main__":
     max_bones_per_vertex = 8
     num_bones = 20
     dtype = torch.float32
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    vertices = torch.rand((batch_size, num_vertices, 3), device='cuda', dtype=dtype)  # Example vertices
-    bone_indices = torch.randint(0, num_bones, (num_vertices, max_bones_per_vertex), device='cuda')  # Example bone indices
-    bone_weights = torch.rand((num_vertices, max_bones_per_vertex), device='cuda', dtype=dtype)  # Example bone weights
+    vertices = torch.rand((batch_size, num_vertices, 3), device=device, dtype=dtype)  # Example vertices
+    bone_indices = torch.randint(0, num_bones, (num_vertices, max_bones_per_vertex), device=device)  # Example bone indices
+    bone_weights = torch.rand((num_vertices, max_bones_per_vertex), device=device, dtype=dtype)  # Example bone weights
     bone_weights = bone_weights / bone_weights.sum(dim=-1, keepdim=True)  # Normalize bone weights
-    bone_transforms = torch.eye(4, device='cuda', dtype=dtype).unsqueeze(0).unsqueeze(0).expand(batch_size, num_bones, -1, -1)  # Example bone transforms
+    bone_transforms = torch.eye(4, device=device, dtype=dtype).unsqueeze(0).unsqueeze(0).expand(batch_size, num_bones, -1, -1)  # Example bone transforms
 
     bone_transforms = bone_transforms.clone().requires_grad_(True)
 
     transformed_vertices = linear_blend_skinning(vertices, bone_weights, bone_indices, bone_transforms)
     foo = torch.sum(transformed_vertices)
     foo.backward()
-
-

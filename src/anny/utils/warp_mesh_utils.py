@@ -160,7 +160,6 @@ def get_point_to_mesh_distance_and_face_uvs_kernel(safe_length: bool = False):
     try:
         return _point_to_mesh_distance_and_face_uvs_kernel_cache[safe_length]
     except KeyError:
-        length_func = get_length_func(safe_length)
         point_triangle_distance = get_point_triangle_distance_func(safe_length)
         @wp.kernel
         def point_to_mesh_distance_and_face_uvs_kernel(mesh_id: wp.uint64,
@@ -328,5 +327,5 @@ class PointToMeshDistanceAndFaceUVs(torch.autograd.Function):
                     device=ctx.warp_device)
         return (to_torch_or_none(ctx.points.grad), to_torch_or_none(ctx.vertices.grad), None, None)
     
-def point_to_mesh_distance_and_face_uvs(points, vertices, faces, max_dist):
+def point_to_mesh_distance_and_face_uvs(points, vertices, faces, max_dist) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     return PointToMeshDistanceAndFaceUVs.apply(points.contiguous(), vertices.contiguous(), faces, max_dist)

@@ -7,10 +7,10 @@ import anny.models.rigged_model
 class TestLocalChanges(unittest.TestCase):
     def test_local_changes(self):
         dtype = torch.float64
-        withoutlocal = anny.create_fullbody_model(local_changes=False).to(dtype=dtype)
-        withlocal = anny.create_fullbody_model(local_changes=True).to(dtype=dtype)
+        withoutlocal = anny.Anny(local_changes="none").to(dtype=dtype)
+        withlocal = anny.Anny(local_changes="default").to(dtype=dtype)
         local_change_labels = ["measure-upperarm-length-incr", "head-angle-out"]
-        withsomelocal = anny.create_fullbody_model(local_changes=local_change_labels, all_phenotypes=False).to(dtype=dtype)
+        withsomelocal = anny.Anny(local_changes=local_change_labels, all_phenotypes=False).to(dtype=dtype)
 
 
         # Generate random shape parameters

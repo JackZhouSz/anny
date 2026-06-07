@@ -7,19 +7,24 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "anny"
-version = "0.3.1"
+version = "0.5"
 authors = [
     { name = "Romain Brégier", email = "romain.bregier@naverlabs.com" }
 ]
 description="A parametric body model based on MakeHuman for PyTorch."
 readme = "README.md"
 license-files = ["LICENSE", "LICENSE_THINGS"]
+requires-python = ">=3.10"
 
 dependencies = [
     "torch>=2.0.0",
     "roma>=1.5.2.1",
     "numpy",
     "pyyaml",
+    "pillow",
+    "requests",
+    "safetensors",
+    "trimesh"
 ]
 
 [tool.setuptools.packages.find]
@@ -35,9 +40,16 @@ include-package-data = true
 examples = [
     "gradio",
     "jsonargparse",
-    "trimesh",
-    "requests"
+    "matplotlib>=3.10.9",
+    "ipykernel",
+    "notebook",
+    "scipy",
+    "nbstripout",
+    "py-soma-x==0.1.0"
 ]
 warp = [
     "warp-lang"
+]
+smpl = [
+    "smplx"
 ]

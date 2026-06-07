@@ -1,0 +1,31 @@
+{
+  "name": "devcontainer",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "runArgs": [
+    "--device", "nvidia.com/gpu=all",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges"
+  ],
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localEnv:HOME}/.claude,target=/root/.claude,type=bind",
+    "source=${localEnv:HOME}/.claude.json,target=/root/.claude.json,type=bind"
+  ],
+  "initializeCommand": "mkdir -p ${localEnv:HOME}/.claude && touch ${localEnv:HOME}/.claude.json",
+  "remoteEnv": {
+    "UV_PROJECT_ENVIRONMENT": "/root/.venv",
+    "VIRTUAL_ENV": "/root/.venv",
+    "PATH": "/root/.venv/bin:${containerEnv:PATH}"
+  },
+  "postCreateCommand": "UV_PROJECT_ENVIRONMENT=/root/.venv uv sync --extra warp --extra examples",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python"
+      ]
+    }
+  }
+}

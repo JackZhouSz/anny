@@ -23,13 +23,13 @@ class TestDegenerateConfiguration(unittest.TestCase):
                 'asian': 0.3333, 
                 'caucasian': 0.3333, 
             }
-        model = anny.create_fullbody_model().to(dtype=torch.float32)
+        model = anny.Anny().to(dtype=torch.float32)
 
         def return_tongue_pose(shape):
             shape = {k: torch.Tensor([v]) for k, v in shape.items()}
             blendshape_coeffs = model.get_phenotype_blendshape_coefficients(**shape) # [bs,564]
-            rest_vertices = model.get_rest_vertices(blendshape_coeffs) # [bs,19158,3]
-            rest_bone_heads, rest_bone_tails, rest_bone_poses = model.get_rest_bone_poses(blendshape_coeffs) # _,_, [bs,163,4,4]
+            rest_model = model.get_rest_model(blendshape_coeffs) # _,_, [bs,163,4,4]
+            rest_bone_poses = rest_model["rest_bone_poses"]
             assert not torch.isnan(rest_bone_poses).any()
             tongue02_bone_index = model.bone_labels.index('tongue02')
             return rest_bone_poses[0, tongue02_bone_index]
